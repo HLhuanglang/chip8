@@ -6,7 +6,7 @@ SRC+=main.go
 build: $(OUT)
 
 $(OUT): ${SRC}
-	go build -o $(OUT) main.go
+	go build -gcflags "all=-N -l" -o $(OUT) main.go
 
 clean:
 	del /Q $(OUT)
