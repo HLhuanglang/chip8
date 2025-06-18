@@ -17,8 +17,8 @@ const (
 	RomEntryPoint     = 0x200
 	ETIRomEntoryPoint = 0x600
 	WindowName        = "chip8"
-	WindowHeight      = 512
-	WindowWidth       = 512
+	WindowHeight      = 470
+	WindowWidth       = 800
 )
 
 type MachineStatus int
@@ -51,6 +51,8 @@ type Chip8Machine struct {
 	RomEntryPoint uint16
 	Window        *sdl.Window
 	Render        *sdl.Renderer
+	Screnn        *sdl.Texture
+	Font          *sdl.Texture
 }
 
 type MachineOption struct {
@@ -93,6 +95,13 @@ func (c *Chip8Machine) Init() error {
 	if err != nil {
 		return err
 	}
+	fmt := sdl.PIXELFORMAT_RGB888
+	access := sdl.TEXTUREACCESS_TARGET
+	c.Screnn, err = c.Render.CreateTexture(uint32(fmt), access, 8, 8)
+	if err != nil {
+		return err
+	}
+	c.loadFont()
 	return nil
 }
 
@@ -123,42 +132,15 @@ func (c *Chip8Machine) handleUserinput() bool {
 		case *sdl.QuitEvent:
 			return false
 		case *sdl.MouseMotionEvent:
-			fmt.Printf("mouse mov:(%d,%d)\n", t.X, t.Y)
 		case *sdl.KeyboardEvent:
 			switch t.Keysym.Scancode {
+			case sdl.SCANCODE_F1:
+				if t.Type == sdl.KEYDOWN {
+					c.State = SYS_PAUSE
+				}
 			case sdl.SCANCODE_F2:
 				if t.Type == sdl.KEYDOWN {
-					path, err := zenity.SelectFile()
-					if err != nil {
-						fmt.Printf("err=%+v\n", err)
-						if err == zenity.ErrCanceled {
-							fmt.Printf("cancel selectfile\n")
-						}
-					} else {
-						c.RomPath = path
-						file, err := os.Open(path)
-						if err != nil {
-							fmt.Printf("failed to open rom: %v\n", err)
-							return true
-						}
-						defer file.Close()
-						info, err := file.Stat()
-						if err != nil {
-							fmt.Printf("get fileinfo faild:%v\n", err)
-							return true
-						}
-						if info.Size() > MaxRomSize {
-							fmt.Printf("Rom size to big")
-							return true
-						}
-						n, err := io.ReadFull(file, c.Memory[0x200:])
-						if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-							fmt.Printf("failed to read rom: %v\n", err)
-						}
-						fmt.Printf("loaded rom: %s (%d bytes)\n", path, n)
-						c.PC = c.RomEntryPoint
-						c.State = SYS_RUNNING
-					}
+					c.loadRom()
 				}
 			}
 		default:
@@ -168,12 +150,47 @@ func (c *Chip8Machine) handleUserinput() bool {
 	return true
 }
 
+func (c *Chip8Machine) loadRom() {
+	path, err := zenity.SelectFile()
+	if err != nil {
+		fmt.Printf("err=%+v\n", err)
+		if err == zenity.ErrCanceled {
+			fmt.Printf("cancel selectfile\n")
+		}
+	} else {
+		c.RomPath = path
+		file, err := os.Open(path)
+		if err != nil {
+			fmt.Printf("failed to open rom: %v\n", err)
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			fmt.Printf("get fileinfo faild:%v\n", err)
+		}
+		if info.Size() > MaxRomSize {
+			fmt.Printf("Rom size to big")
+		}
+		n, err := io.ReadFull(file, c.Memory[0x200:])
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			fmt.Printf("failed to read rom: %v\n", err)
+		}
+		fmt.Printf("loaded rom: %s (%d bytes)\n", path, n)
+		c.PC = c.RomEntryPoint
+		c.State = SYS_RUNNING
+	}
+}
+
 func (c *Chip8Machine) emulateInstruction() {
 	if c.State != SYS_RUNNING {
 		return
 
 	}
 	inst := NewInstruction(c.fetch())
+	if c.PC > 0xfff {
+		c.State = SYS_QUIT
+	}
+	fmt.Printf("Address:0x%X Opcode:0x%X NNN:0x%x NN:0x%x N:0x%x X:%d Y:%d\n", c.PC-2, inst.Opcode, inst.NNN, inst.NN, inst.N, inst.X, inst.Y)
 	opType := inst.Opcode >> 12
 	switch opType { //指令集分类见：https://github.com/mattmikolay/chip-8/wiki/CHIP%E2%80%908-Instruction-Set
 	case 0x0:
@@ -236,9 +253,100 @@ func (c *Chip8Machine) fetch() uint16 {
 }
 
 func (c *Chip8Machine) updateScreen() {
+	//绘制背景
+	c.Render.SetDrawColor(32, 42, 53, 255)
+	c.Render.Clear()
+
+	//绘制内部边框,划分四大块区域,边框线条占用1pt
+	c.splitRegion(8, 8, 512+2, 256+2)     //游戏屏幕
+	c.splitRegion(526, 8, 266+2, 256+2)   //PC-地址-指令集
+	c.splitRegion(8, 270, 512+2, 192+2)   //日志信息打印
+	c.splitRegion(526, 270, 266+2, 192+2) //寄存器/栈
+
+	//绘制不同区域内容
+	c.drawScreen()
+	c.drawInst()
+	c.drawLog()
+	c.drawRegs()
+
+	//渲染
+	c.Render.Present()
+}
+
+func (c *Chip8Machine) splitRegion(x, y, w, h int32) {
+	c.Render.SetDrawColor(0, 0, 0, 255)
+	c.Render.DrawLine(x, y, x+w, y) //上
+	c.Render.DrawLine(x, y, x, y+h) //左
+	c.Render.SetDrawColor(95, 112, 120, 255)
+	c.Render.DrawLine(x+w, y, x+w, y+h) //右
+	c.Render.DrawLine(x, y+h, x+w, y+h) //下
+}
+
+func (c *Chip8Machine) drawScreen() {
+	src := sdl.Rect{
+		W: int32(8),
+		H: int32(8),
+	}
+
+	// stretch the render target to fit
+	c.Render.Copy(c.Screnn, &src, &sdl.Rect{X: 8, Y: 8, W: 512, H: 256})
+}
+
+func (c *Chip8Machine) drawInst() {
+	//TODO
+}
+
+func (c *Chip8Machine) drawLog() {
+	c.drawText("ABCDEFGHIJKLMNOPQRSTUVWXYZ 1234567890", 8+2, 270+2)
+}
+
+func (c *Chip8Machine) drawRegs() {
 	//TODO
 }
 
 func (c *Chip8Machine) updateVideo() {
 	//TODO
+}
+
+func (c *Chip8Machine) loadFont() {
+	var surface *sdl.Surface
+	var err error
+
+	if surface, err = sdl.LoadBMP("font.bmp"); err != nil {
+		panic(err)
+	}
+
+	// get the magenta color
+	mask := sdl.MapRGB(surface.Format, 255, 0, 255)
+
+	// set the mask color key
+	surface.SetColorKey(true, mask)
+
+	// create the texture
+	if c.Font, err = c.Render.CreateTextureFromSurface(surface); err != nil {
+		panic(err)
+	}
+}
+
+func (c *Chip8Machine) drawText(s string, x, y int) {
+	src := sdl.Rect{W: 5, H: 7}
+	dst := sdl.Rect{
+		X: int32(x),
+		Y: int32(y),
+		W: 5,
+		H: 7,
+	}
+
+	// loop over all the characters in the string
+	for _, ch := range s {
+		if ch > 32 && ch < 127 {
+			src.X = (ch - 33) * 6
+
+			// draw the character to the renderer
+			c.Render.Copy(c.Font, &src, &dst)
+		}
+
+		// advance
+		dst.X += 7
+	}
 }
